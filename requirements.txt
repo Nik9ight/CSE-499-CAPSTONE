@@ -1,0 +1,15 @@
+einops
+fvcore
+huggingface_hub
+monai
+mpmath
+pytorch-lightning
+timm
+transformers
+pandas
+wandb
+tensorboardX
+ml_collections
+torchmetrics
+opencv-python
+pytest
