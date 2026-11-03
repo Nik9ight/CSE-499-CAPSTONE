@@ -65,7 +65,7 @@ def configure_run(config, experiment=None, seed=None, batch_size=None,
             "seed", "batch_size", "epochs", "learning_rate", "warmup_epochs",
             "freeze_backbone_epochs", "precision", "num_workers", "deterministic",
             "peal_loss_weight", "deep_supervision_loss_weight", "aux_loss_weights",
-            "early_stopping_patience", "use_mixup_cutmix",
+            "early_stopping_patience", "early_stopping_min_delta", "use_mixup_cutmix",
         )},
         "evaluation": {key: getattr(config, key) for key in (
             "use_tta", "use_ms_tta", "ms_tta_sizes", "threshold_sweep",

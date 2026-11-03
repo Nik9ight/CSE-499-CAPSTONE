@@ -233,6 +233,21 @@ def test_calibration_writes_settings_and_restores_mode(tiny_settings, tmp_path):
     assert module.training
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_calibration_runs_on_training_device_after_teardown(tiny_settings, tmp_path, monkeypatch):
+    # Lightning's teardown leaves the module on CPU before on_fit_end runs.
+    module = LViTLightningModule(model_kwargs=tiny_settings, backbone_pretrained=False).cpu()
+    trainer = SimpleNamespace(is_global_zero=True, callbacks=[],
+                              strategy=SimpleNamespace(root_device=torch.device("cuda", 0)),
+                              datamodule=SimpleNamespace(val_dataloader=sample_loader))
+    callback = ThresholdSweepCallback(str(tmp_path), use_tta=False, tta_sizes=(64,))
+    seen = []
+    monkeypatch.setattr(callback, "_calibrate", lambda trainer, pl_module: seen.append(pl_module.device))
+    callback.on_fit_end(trainer, module)
+    assert seen == [torch.device("cuda", 0)]
+    assert module.device == torch.device("cpu")
+
+
 def test_calibration_empty_loader_restores_mode(tiny_settings, tmp_path):
     module = LViTLightningModule(model_kwargs=tiny_settings, backbone_pretrained=False)
     trainer = SimpleNamespace(is_global_zero=True, callbacks=[],

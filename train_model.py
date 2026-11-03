@@ -49,6 +49,7 @@ def main(experiment=None, seed=None, batch_size=None, checkpointing=False,
     early_stop_cb = EarlyStopping(
         monitor="val/dice",
         patience=config.early_stopping_patience,
+        min_delta=config.early_stopping_min_delta,
         mode="max",
         verbose=False,
     )

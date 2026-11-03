@@ -29,7 +29,7 @@ text_encoder    = 'microsoft/BiomedVLP-CXR-BERT-specialized'
 text_embed_dim  = 768            # 768 for BERT-base, 1024 for BERT-large, etc.
 epochs          = 201
 img_size        = 224
-batch_size      = 32
+batch_size      = 16
 learning_rate   = 3e-4           # Covid19 recommended 3e-4, MoNuSeg is usually 1e-3
 warmup_epochs   = 5              # linear LR warmup epochs before cosine decay
 freeze_backbone_epochs = 5       # epochs to freeze backbone before joint fine-tuning
@@ -47,6 +47,7 @@ print_frequency = 100             #originally 200
 vis_frequency   = 0
 save_after_epoch = 1            # only start saving best after this epoch
 early_stopping_patience = 20
+early_stopping_min_delta = 5e-4  # val Dice gain needed to reset patience (0 = any gain counts)
 
 num_workers     = 2
 
@@ -70,7 +71,7 @@ vit_depth              = 2       # transformer blocks per cascade stage  (was 4)
 vit_heads              = 8       # attention heads per stage
 vit_drop_rate          = 0.0     # dropout in attention/FFN of cascade blocks
 vit_drop_path_rate     = 0.2     # max stochastic-depth rate (linear across blocks)  (was 0.1)
-gradient_checkpointing = False   # set True when batch >= 16 to save memory
+gradient_checkpointing = False   # router presets need True (--checkpointing) above batch 16 on 12 GB
 use_prev_cross_attention = True  # ablation: stage 2-4 residual cross-attend to previous-stage tokens
 use_adaptive_gated_fusion = False  # ablation: gate text-enhanced tokens vs plain residual text update
 use_freq                = True   # ablation: frequency-domain enhancement before tokenization
@@ -140,7 +141,7 @@ tensorboard_folder = save_path + 'tensorboard_logs/'
 logger_path = save_path + session_name + ".log"
 visualize_path = save_path + 'visualize_val/'
 
-test_session   = session_name
+test_session   = "qata/LViT/router_region_seed42_10.28_01h23m48s_757816/models/best_model-LViT.ckpt"
 
 n_channels     = 3
 n_labels       = 1   # binary mask

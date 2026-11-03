@@ -22,7 +22,9 @@ test_predictions/
 qata/
 MosMed/
 mosmed/
-tests/*
+# Experiment logs and checkpoints stay on the machine that ran them (see EXPERIMENT_LOG.md)
+experiment_logs/
+*.ckpt
 lib/
 data/
 docs/
@@ -31,7 +33,6 @@ encodings/
 myenv/
 eggs/
 .eggs/
-lib/
 Runned/
 .claude/
 lib64/
@@ -70,14 +71,19 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
-tests/
-!tests/
 tests/*
 !tests/test_flop_counter.py
 !tests/test_train_model_flops_hook.py
 !tests/test_backbone_features.py
 !tests/test_training_evaluation.py
 !tests/test_joint_router.py
+# Check, timing and monitoring scripts that need real data or the GPU (not collected by pytest)
+!tests/check_dataset.py
+!tests/check_priority0.py
+!tests/smoke_train.py
+!tests/time_dataloader.py
+!tests/time_epoch.py
+!tests/watch_run.py
 tests/__pycache__/
 
 # Translations
@@ -236,7 +242,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-AGENTS.md
 AGENTS.md
 
 PROJECT_MEMORY.md

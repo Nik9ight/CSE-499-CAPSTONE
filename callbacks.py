@@ -135,6 +135,12 @@ class ThresholdSweepCallback(pl.Callback):
                 best_ckpt = cb.best_model_path
                 break
 
+        # Lightning's teardown moves the module to CPU before on_fit_end, so move it
+        # back to the training device for the sweep and restore it afterwards.
+        original_device = pl_module.device
+        strategy = getattr(trainer, "strategy", None)
+        if strategy is not None:
+            pl_module.to(strategy.root_device)
         device = pl_module.device
         if best_ckpt and os.path.exists(best_ckpt):
             print(f"[ThresholdSweep] loading best ckpt: {best_ckpt}")
@@ -146,6 +152,7 @@ class ThresholdSweepCallback(pl.Callback):
             self._calibrate(trainer, pl_module)
         finally:
             pl_module.train(was_training)
+            pl_module.to(original_device)
 
     def _calibrate(self, trainer, pl_module):
         device = pl_module.device
