@@ -28,20 +28,20 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
-def get_train_transforms(img_size: int) -> Compose:
+def get_train_transforms(img_size: int, geometric_augmentation: bool = True) -> Compose:
     """Expects image as [C,H,W] float and label as [1,H,W] float (prepared in __getitem__)."""
     return Compose([
         ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0),
         Resized(keys=["image"], spatial_size=(img_size, img_size), mode="bilinear"),
         Resized(keys=["label"], spatial_size=(img_size, img_size), mode="nearest"),
         # Geometric augmentations (image + mask)
-        RandRotate90d(keys=["image", "label"], prob=0.5, spatial_axes=(0, 1)),
-        RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=[1]),
-        RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=[0]),
+        RandRotate90d(keys=["image", "label"], prob=0.5 if geometric_augmentation else 0.0, spatial_axes=(0, 1)),
+        RandFlipd(keys=["image", "label"], prob=0.5 if geometric_augmentation else 0.0, spatial_axis=[1]),
+        RandFlipd(keys=["image", "label"], prob=0.5 if geometric_augmentation else 0.0, spatial_axis=[0]),
         RandRotated(
             keys=["image", "label"],
             range_x=0.5236,  # ±30 degrees
-            prob=0.25,
+            prob=0.25 if geometric_augmentation else 0.0,
             mode=("bilinear", "nearest"),
             padding_mode="zeros",
         ),
@@ -49,7 +49,7 @@ def get_train_transforms(img_size: int) -> Compose:
         RandAdjustContrastd(keys=["image"], prob=0.3, gamma=(0.8, 1.2)),
         RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.3),
         RandGaussianNoised(keys=["image"], prob=0.15, mean=0.0, std=0.02),
-        RandGridDistortiond(keys=["image", "label"], prob=0.15, distort_limit=(-0.1, 0.1)),
+        RandGridDistortiond(keys=["image", "label"], prob=0.15 if geometric_augmentation else 0.0, distort_limit=(-0.1, 0.1)),
         # Normalize with ImageNet stats
         NormalizeIntensityd(keys=["image"], subtrahend=IMAGENET_MEAN, divisor=IMAGENET_STD, channel_wise=True),
         EnsureTyped(keys=["image", "label"], dtype=torch.float32),
@@ -159,8 +159,10 @@ class ImageToImage2D(Dataset):
         text_embed_dim: int = 768,
         text_csv_path: str = None,
         text_encoder_name: str = None,
+        use_text: bool = True,
     ):
         self.dataset_path = dataset_path
+        self.use_text = use_text
         self.image_size = image_size
         self.max_text_tokens = max_text_tokens
         self.text_embed_dim = text_embed_dim
@@ -179,6 +181,11 @@ class ImageToImage2D(Dataset):
 
         self.one_hot_mask = one_hot_mask if one_hot_mask else 0
         self.joint_transform = joint_transform or get_val_transforms(image_size)
+
+        if not use_text:
+            self.img_to_text = {}
+            self.tokenizer = None
+            return
 
         # Text: store raw descriptions; tokenization runs per item (cheap, CPU).
         # The frozen BERT lives inside the model and runs once per batch on GPU,
@@ -247,8 +254,9 @@ class ImageToImage2D(Dataset):
             oh = torch.nn.functional.one_hot(lbl, num_classes=self.one_hot_mask)
             sample["label"] = oh.permute(2, 0, 1).float()
 
-        input_ids, attention_mask = self._tokenize_text(image_filename)
-        sample["input_ids"] = input_ids
-        sample["attention_mask"] = attention_mask
+        if self.use_text:
+            input_ids, attention_mask = self._tokenize_text(image_filename)
+            sample["input_ids"] = input_ids
+            sample["attention_mask"] = attention_mask
 
         return sample, image_filename

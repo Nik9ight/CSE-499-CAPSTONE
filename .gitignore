@@ -19,6 +19,8 @@ Covid19/
 test_predictions/
 *.zip
 *.sh
+!run_cumulative.sh
+cumulative_results/
 qata/
 MosMed/
 mosmed/
@@ -77,6 +79,8 @@ tests/*
 !tests/test_backbone_features.py
 !tests/test_training_evaluation.py
 !tests/test_joint_router.py
+!tests/test_cumulative_runner.py
+!tests/test_cumulative_models.py
 # Check, timing and monitoring scripts that need real data or the GPU (not collected by pytest)
 !tests/check_dataset.py
 !tests/check_priority0.py

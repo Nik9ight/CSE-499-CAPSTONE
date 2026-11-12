@@ -250,9 +250,21 @@ class LViTN(nn.Module):
         aspp_dilations=(1, 3, 6, 9),
         aspp_dropout: float = 0.1,
         router_config: dict | None = None,
+        use_text: bool = True,
+        text_fusion_mode: str = "learned",
+        use_visual_refinement: bool = True,
+        use_aspp: bool = True,
+        use_high_res_tail: bool = True,
     ) -> None:
         super().__init__()
         self.deep_supervision = deep_supervision
+        self.use_text = use_text
+        self.text_fusion_mode = text_fusion_mode
+        self.use_high_res_tail = use_high_res_tail
+        if text_fusion_mode not in {"learned", "uniform", "final"}:
+            raise ValueError("text_fusion_mode must be learned, uniform, or final.")
+        if not use_text and normalize_router_config(router_config)["mode"] != "off":
+            raise ValueError("Image-only cumulative variants require routing off.")
         self.img_size = img_size
         self.text_embed_dim = text_embed_dim
         self.router_config = normalize_router_config(router_config)
@@ -261,10 +273,15 @@ class LViTN(nn.Module):
 
         resolved_text_encoder = text_encoder_name or _default_text_encoder_name()
         self.text_encoder_name = resolved_text_encoder
-        self.text_encoder = TextEncoder(model_name=resolved_text_encoder, lib_dir=_lib_dir())
-        self.text_fusion = HierarchicalTextFusion(
-            num_layers=bert_num_layers, num_groups=num_text_groups,
+        self.text_encoder = (
+            TextEncoder(model_name=resolved_text_encoder, lib_dir=_lib_dir()) if use_text else None
         )
+        self.text_fusion = (
+            HierarchicalTextFusion(num_layers=bert_num_layers, num_groups=num_text_groups)
+            if use_text else None
+        )
+        if self.text_fusion is not None and text_fusion_mode != "learned":
+            self.text_fusion.alpha.requires_grad_(False)
 
         self.backbone, channels = get_backbone_features(
             backbone_name, pretrained=backbone_pretrained, in_chans=n_channels,
@@ -283,7 +300,7 @@ class LViTN(nn.Module):
             nn.Linear(ch2, text_embed_dim),
             nn.Linear(ch3, text_embed_dim),
             nn.Linear(ch4, text_embed_dim),
-        ])
+        ]) if use_text else nn.ModuleList()
 
         # Global stochastic-depth schedule: linearly increasing drop rate across
         # all 4*vit_depth blocks, sliced per stage (standard ViT recipe).
@@ -298,6 +315,7 @@ class LViTN(nn.Module):
             use_prev_cross_attention=use_prev_cross_attention,
             use_adaptive_gated_fusion=use_adaptive_gated_fusion,
             router_config=self.router_config, text_group_index=0,
+            use_text=use_text, use_visual_refinement=use_visual_refinement,
         )
         self.stage2 = CascadeViTStage(
             img_size=img_size // 8, in_channels=ch2, embed_dim=ch2,
@@ -308,6 +326,7 @@ class LViTN(nn.Module):
             use_prev_cross_attention=use_prev_cross_attention,
             use_adaptive_gated_fusion=use_adaptive_gated_fusion,
             router_config=self.router_config, text_group_index=1,
+            use_text=use_text, use_visual_refinement=use_visual_refinement,
         )
         self.stage3 = CascadeViTStage(
             img_size=img_size // 16, in_channels=ch3, embed_dim=ch3,
@@ -318,6 +337,7 @@ class LViTN(nn.Module):
             use_prev_cross_attention=use_prev_cross_attention,
             use_adaptive_gated_fusion=use_adaptive_gated_fusion,
             router_config=self.router_config, text_group_index=2,
+            use_text=use_text, use_visual_refinement=use_visual_refinement,
         )
         self.stage4 = CascadeViTStage(
             img_size=img_size // 32, in_channels=ch4, embed_dim=ch4,
@@ -328,6 +348,7 @@ class LViTN(nn.Module):
             use_prev_cross_attention=use_prev_cross_attention,
             use_adaptive_gated_fusion=use_adaptive_gated_fusion,
             router_config=self.router_config, text_group_index=3,
+            use_text=use_text, use_visual_refinement=use_visual_refinement,
         )
 
         # ASPP on the stage-3 spatial skip. Channels match ch3 (384 for ConvNeXt-Tiny/Small)
@@ -340,7 +361,7 @@ class LViTN(nn.Module):
         self.aspp = ASPP2D(
             in_ch=ch3, out_ch=ch3,
             dilations=tuple(aspp_dilations), dropout=aspp_dropout,
-        )
+        ) if use_aspp else nn.Identity()
         # UNETR decoder -- monai UnetrUpBlock with residual conv blocks.
         # Requires skip channels == out_channels (holds for ConvNeXt: ch_i = ch_{i-1}*2).
         self.decoder3 = UnetrUpBlock(
@@ -364,26 +385,29 @@ class LViTN(nn.Module):
         h2_ch = ch1 // 2
         h1_ch = ch1 // 4
 
-        self.stem_h1 = nn.Sequential(
-            nn.Conv2d(n_channels, h1_ch, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(h1_ch),
-            nn.ReLU(inplace=True),
-        )
-        self.stem_h2 = nn.Sequential(
-            nn.Conv2d(h1_ch, h2_ch, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(h2_ch),
-            nn.ReLU(inplace=True),
-        )
+        if use_high_res_tail:
+            self.stem_h1 = nn.Sequential(
+                nn.Conv2d(n_channels, h1_ch, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(h1_ch),
+                nn.ReLU(inplace=True),
+            )
+            self.stem_h2 = nn.Sequential(
+                nn.Conv2d(h1_ch, h2_ch, kernel_size=3, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(h2_ch),
+                nn.ReLU(inplace=True),
+            )
 
-        self.up2 = UnetrUpBlock(
-            spatial_dims=2, in_channels=ch2 // 2, out_channels=h2_ch,
-            kernel_size=3, upsample_kernel_size=2, norm_name="batch", res_block=True,
-        )
-        self.up1 = UnetrUpBlock(
-            spatial_dims=2, in_channels=h2_ch, out_channels=h1_ch,
-            kernel_size=3, upsample_kernel_size=2, norm_name="batch", res_block=True,
-        )
-        self.seg_head = nn.Conv2d(h1_ch, n_classes, kernel_size=1)
+            self.up2 = UnetrUpBlock(
+                spatial_dims=2, in_channels=ch2 // 2, out_channels=h2_ch,
+                kernel_size=3, upsample_kernel_size=2, norm_name="batch", res_block=True,
+            )
+            self.up1 = UnetrUpBlock(
+                spatial_dims=2, in_channels=h2_ch, out_channels=h1_ch,
+                kernel_size=3, upsample_kernel_size=2, norm_name="batch", res_block=True,
+            )
+            self.seg_head = nn.Conv2d(h1_ch, n_classes, kernel_size=1)
+        else:
+            self.seg_head = nn.Conv2d(ch2 // 2, n_classes, kernel_size=1)
         # Focal-style bias prior: start predicting low foreground probability so the
         # small-lesion class isn't drowned out at init. pi is the assumed foreground
         # fraction; tune toward the dataset's positive ratio if known.
@@ -397,19 +421,27 @@ class LViTN(nn.Module):
         for h in (self.aux_head_d1, self.aux_head_d2):
             nn.init.constant_(h.bias, -math.log((1.0 - prior) / prior))
 
-    def forward(self, x: torch.Tensor, text, text_mask=None,
+    def _fuse_text(self, hidden_stack):
+        if self.text_fusion_mode == "final":
+            return (hidden_stack[:, -1],) * 4
+        return self.text_fusion(hidden_stack)
+
+    def forward(self, x: torch.Tensor, text=None, text_mask=None,
                 return_routing: bool = False, routing_override: str | None = None) -> dict:
         # --- Per-stage text features ---
         # Accept either tokenizer output (dict) for in-model BERT, a pre-computed
         # 4D layer stack [B, num_layers, L, H], or a 3D legacy embedding [B, L, H]
         # which is broadcast unchanged to every stage.
-        if isinstance(text, dict):
+        if not self.use_text:
+            tx1 = tx2 = tx3 = tx4 = None
+            text_mask = None
+        elif isinstance(text, dict):
             text_mask = text["attention_mask"]
             hidden_stack = self.text_encoder(text["input_ids"], text["attention_mask"])
-            tx1, tx2, tx3, tx4 = self.text_fusion(hidden_stack)
+            tx1, tx2, tx3, tx4 = self._fuse_text(hidden_stack)
         elif torch.is_tensor(text):
             if text.dim() == 4:
-                tx1, tx2, tx3, tx4 = self.text_fusion(text)
+                tx1, tx2, tx3, tx4 = self._fuse_text(text)
             elif text.dim() == 3:
                 if self.router_config["mode"] != "off":
                     raise ValueError("Language-depth routing needs tokenizer output or a BERT layer stack.")
@@ -452,14 +484,16 @@ class LViTN(nn.Module):
             tokens.append(previous)
         t1, t2, t3, t4 = tokens
 
-        peal_visual = tuple(
-            proj(tokens.mean(dim=1))
-            for proj, tokens in zip(self.peal_visual_projs, (t1, t2, t3, t4))
-        )
-        peal_text = tuple(
-            pool_text_tokens(stage_text, text_mask)
-            for stage_text in (tx1, tx2, tx3, tx4)
-        )
+        peal_visual = peal_text = None
+        if self.use_text:
+            peal_visual = tuple(
+                proj(tokens.mean(dim=1))
+                for proj, tokens in zip(self.peal_visual_projs, (t1, t2, t3, t4))
+            )
+            peal_text = tuple(
+                pool_text_tokens(stage_text, text_mask)
+                for stage_text in (tx1, tx2, tx3, tx4)
+            )
 
         # --- Token -> spatial ---
         s4 = tokens_to_spatial(t4, *f4.shape[-2:])
@@ -476,12 +510,16 @@ class LViTN(nn.Module):
         d1 = self.decoder1(d2, s1)          # [B, ch2//2, H/4, W/4]
 
         # --- High-res tail: learned upsampling fused with input-stem skips ---
-        e1 = self.stem_h1(x)                # [B, h1_ch, H, W]
-        e2 = self.stem_h2(e1)               # [B, h2_ch, H/2, W/2]
-        u2 = self.up2(d1, e2)               # [B, h2_ch, H/2, W/2]
-        u1 = self.up1(u2, e1)               # [B, h1_ch, H, W]
+        if self.use_high_res_tail:
+            e1 = self.stem_h1(x)                # [B, h1_ch, H, W]
+            e2 = self.stem_h2(e1)               # [B, h2_ch, H/2, W/2]
+            u2 = self.up2(d1, e2)               # [B, h2_ch, H/2, W/2]
+            u1 = self.up1(u2, e1)               # [B, h1_ch, H, W]
 
-        main = self.seg_head(u1)
+            main = self.seg_head(u1)
+        else:
+            main = F.interpolate(self.seg_head(d1), size=x.shape[-2:],
+                                 mode="bilinear", align_corners=False)
         out = {"main": main, "peal_visual": peal_visual, "peal_text": peal_text}
         if return_routing:
             out["routing"] = routing

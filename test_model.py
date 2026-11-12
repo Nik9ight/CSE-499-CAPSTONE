@@ -1,4 +1,7 @@
 import argparse
+import csv
+import time
+from pathlib import Path
 import inspect
 import json
 import os
@@ -13,7 +16,8 @@ import Config as config
 from Load_Dataset import ImageToImage2D, get_val_transforms
 from nets.LViT_new import LViTN
 from nets.routing import ROUTING_INTERVENTIONS
-from model_settings import normalize_router_config
+from model_settings import normalize_router_config, CUMULATIVE_MODEL_DEFAULTS
+from experiment_io import atomic_json
 
 
 def tta_inference(model, image, text, sizes=None, routing_override=None):
@@ -68,14 +72,15 @@ def load_model(device, checkpoint_path=None, model_kwargs=None):
             "This checkpoint has no architecture snapshot. Pass --model-config "
             "with the LViTN constructor settings used during training."
         )
-    resolved = dict(saved_kwargs if saved_kwargs is not None else model_kwargs)
+    resolved = {**CUMULATIVE_MODEL_DEFAULTS,
+                **dict(saved_kwargs if saved_kwargs is not None else model_kwargs)}
     # Pre-router snapshots omit this field and must retain the legacy guidance path.
     resolved["router_config"] = normalize_router_config(resolved.get("router_config"))
     # JSON represents tuples as lists; normalize before comparing snapshots.
     if "aspp_dilations" in resolved:
         resolved["aspp_dilations"] = tuple(resolved["aspp_dilations"])
     if saved_kwargs is not None and model_kwargs is not None:
-        override = dict(model_kwargs)
+        override = {**CUMULATIVE_MODEL_DEFAULTS, **dict(model_kwargs)}
         override["router_config"] = normalize_router_config(override.get("router_config"))
         if "aspp_dilations" in override:
             override["aspp_dilations"] = tuple(override["aspp_dilations"])
@@ -97,9 +102,15 @@ def load_model(device, checkpoint_path=None, model_kwargs=None):
     return model.to(device).eval(), checkpoint_path
 
 
-def evaluate(checkpoint_path=None, model_kwargs=None, routing_override=None, routing_seed=0):
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def evaluate(checkpoint_path=None, model_kwargs=None, routing_override=None, routing_seed=0,
+             *, protocol="saved", batch_size=16, results_json=None, output_dir=None,
+             save_predictions=True, device_name=None):
+    if protocol not in {"saved", "native"}:
+        raise ValueError("Evaluation protocol must be saved or native.")
+    if batch_size < 1:
+        raise ValueError("Evaluation batch size must be positive.")
+    started = time.monotonic()
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     use_tta = getattr(config, "use_tta", True)
     if routing_override == "shuffle":
         torch.manual_seed(routing_seed)
@@ -117,7 +128,12 @@ def evaluate(checkpoint_path=None, model_kwargs=None, routing_override=None, rou
     )
     pred_threshold = 0.5
     tta_sizes = config.ms_tta_sizes if config.use_ms_tta else (model.img_size,)
-    if os.path.exists(threshold_path):
+    if protocol == "native":
+        use_tta = False
+        pred_threshold = 0.5
+        tta_sizes = (model.img_size,)
+        print("[test] native protocol: no TTA, fixed threshold 0.5 (ignoring calibration)")
+    elif os.path.exists(threshold_path):
         with open(threshold_path) as f:
             data = json.load(f)
         pred_threshold = float(data.get("threshold", 0.5))
@@ -137,21 +153,26 @@ def evaluate(checkpoint_path=None, model_kwargs=None, routing_override=None, rou
         text_embed_dim=model.text_embed_dim,
         text_csv_path=config.test_text_csv,
         text_encoder_name=model.text_encoder_name,
+        use_text=model.use_text,
     )
-    test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+    if len(test_dataset) == 0:
+        raise ValueError("Testing requires a nonempty dataset.")
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     dice_metric_pixel = BinaryF1Score().to(device)
     iou_metric_pixel = BinaryJaccardIndex().to(device)
 
     image_dice_list = []
     image_iou_list = []
+    case_rows = []
 
-    vis_path = f"./test_predictions/{config.task_name}/{config.session_name}/"
+    vis_path = str(output_dir) if output_dir is not None else f"./test_predictions/{config.task_name}/{config.session_name}/"
     if routing_override is not None:
         intervention_name = f"shuffle_seed{routing_seed}" if routing_override == "shuffle" else routing_override
         vis_path = os.path.join(vis_path, intervention_name)
         print(f"[test] routing intervention: {routing_override}; retaining the calibrated threshold")
-    os.makedirs(vis_path, exist_ok=True)
+    if save_predictions:
+        os.makedirs(vis_path, exist_ok=True)
 
     with tqdm(total=len(test_loader), desc="Testing", ncols=70) as pbar:
         for sampled_batch, names in test_loader:
@@ -193,8 +214,13 @@ def evaluate(checkpoint_path=None, model_kwargs=None, routing_override=None, rou
             image_iou_list.append(iou_scores.cpu())
 
             for i in range(preds_bin.shape[0]):
-                pred_np = preds_bin[i, 0].cpu().numpy().astype(np.uint8) * 255
-                cv2.imwrite(os.path.join(vis_path, names[i]), pred_np)
+                case_rows.append({"case_id": names[i], "dice": dice_scores[i].item(),
+                                  "iou": iou_scores[i].item(), "tp": int(inter[i].item()),
+                                  "pred_area": int(preds_flat[i].sum().item()),
+                                  "gt_area": int(masks_flat[i].sum().item())})
+                if save_predictions:
+                    pred_np = preds_bin[i, 0].cpu().numpy().astype(np.uint8) * 255
+                    cv2.imwrite(os.path.join(vis_path, names[i]), pred_np)
 
             pbar.update(1)
 
@@ -208,6 +234,25 @@ def evaluate(checkpoint_path=None, model_kwargs=None, routing_override=None, rou
     print(f" Test IoU  (Per-Image / Macro):  {macro_iou}")
     print(f"{'='*45}")
 
+    result = {
+        "checkpoint": str(Path(ckpt_path).resolve()), "dataset": config.task_name,
+        "protocol": protocol, "threshold": pred_threshold, "use_tta": use_tta,
+        "tta_sizes": list(tta_sizes), "precision": "32", "batch_size": batch_size,
+        "test_cases": len(case_rows), "test_macro_dice": macro_dice,
+        "test_macro_iou": macro_iou, "test_global_dice": dice_metric_pixel.compute().item(),
+        "test_global_iou": iou_metric_pixel.compute().item(),
+        "test_seconds": time.monotonic() - started,
+    }
+    if results_json:
+        case_path = Path(results_json).with_name("test_cases.csv")
+        case_path.parent.mkdir(parents=True, exist_ok=True)
+        with case_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(case_rows[0]))
+            writer.writeheader()
+            writer.writerows(case_rows)
+        atomic_json(results_json, result)
+    return result
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate a text-guided segmentation checkpoint.")
@@ -216,9 +261,16 @@ if __name__ == "__main__":
     parser.add_argument("--routing-override", choices=ROUTING_INTERVENTIONS,
                         help="Evaluation-only intervention; keep the checkpoint's calibrated threshold.")
     parser.add_argument("--routing-seed", type=int, default=0, help="Seed for shuffled routing interventions.")
+    parser.add_argument("--protocol", choices=("saved", "native"), default="saved")
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--results-json")
+    parser.add_argument("--output-dir")
+    parser.add_argument("--no-save-predictions", action="store_true")
     args = parser.parse_args()
     architecture = None
     if args.model_config:
         with open(args.model_config, encoding="utf-8") as f:
             architecture = json.load(f)
-    evaluate(args.checkpoint, architecture, args.routing_override, args.routing_seed)
+    evaluate(args.checkpoint, architecture, args.routing_override, args.routing_seed,
+             protocol=args.protocol, batch_size=args.batch_size, results_json=args.results_json,
+             output_dir=args.output_dir, save_predictions=not args.no_save_predictions)

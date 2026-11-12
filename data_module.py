@@ -17,10 +17,15 @@ class LViTDataModule(pl.LightningDataModule):
         num_workers=None,
     ):
         super().__init__()
-        self.train_transforms = train_transforms or get_train_transforms(config.img_size)
+        self.train_transforms = train_transforms or get_train_transforms(
+            config.img_size, geometric_augmentation=getattr(config, "geometric_augmentation", True),
+        )
         self.val_transforms = val_transforms or get_val_transforms(config.img_size)
+        # MONAI Randomizable transforms use their own RNG.
+        if hasattr(self.train_transforms, "set_random_state"):
+            self.train_transforms.set_random_state(seed=config.seed)
         self.batch_size = batch_size or config.batch_size
-        self.num_workers = num_workers or config.num_workers
+        self.num_workers = config.num_workers if num_workers is None else num_workers
 
     def setup(self, stage=None):
         if stage == "fit" or stage is None:
@@ -29,6 +34,7 @@ class LViTDataModule(pl.LightningDataModule):
                 joint_transform=self.train_transforms,
                 image_size=config.img_size,
                 text_embed_dim=config.text_embed_dim,
+                use_text=getattr(config, "use_text", True),
                 text_csv_path=config.train_text_csv,
             )
             self.val_dataset = ImageToImage2D(
@@ -36,6 +42,7 @@ class LViTDataModule(pl.LightningDataModule):
                 joint_transform=self.val_transforms,
                 image_size=config.img_size,
                 text_embed_dim=config.text_embed_dim,
+                use_text=getattr(config, "use_text", True),
                 text_csv_path=config.val_text_csv,
             )
 
@@ -45,6 +52,7 @@ class LViTDataModule(pl.LightningDataModule):
                 joint_transform=self.val_transforms,
                 image_size=config.img_size,
                 text_embed_dim=config.text_embed_dim,
+                use_text=getattr(config, "use_text", True),
                 text_csv_path=config.test_text_csv,
             )
 
@@ -53,6 +61,7 @@ class LViTDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
+            generator=torch.Generator().manual_seed(config.seed),
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=(self.num_workers > 0),
@@ -82,6 +91,8 @@ class LViTDataModule(pl.LightningDataModule):
 
     @staticmethod
     def _worker_init_fn(worker_id):
-        seed = config.seed + worker_id
+        from monai.data.utils import worker_init_fn
+        worker_init_fn(worker_id)
+        seed = torch.initial_seed() % (2 ** 32)
         random.seed(seed)
         np.random.seed(seed)

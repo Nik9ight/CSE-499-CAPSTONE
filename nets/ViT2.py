@@ -140,11 +140,17 @@ class CascadeViTBlock(nn.Module):
         use_adaptive_gated_fusion: bool = True,
         router_config: dict | None = None,
         text_group_index: int = 0,
+        use_text: bool = True,
+        use_visual_refinement: bool = True,
     ) -> None:
         super().__init__()
         self.use_prev_cross_attention = use_prev_cross_attention
+        self.use_text = use_text
+        self.use_visual_refinement = use_visual_refinement
         self.use_adaptive_gated_fusion = use_adaptive_gated_fusion
         routing = normalize_router_config(router_config)
+        if not use_text and routing["mode"] != "off":
+            raise ValueError("Image-only cumulative variants require routing off.")
         if routing["mode"] != "off" and use_adaptive_gated_fusion:
             raise ValueError("Joint routing and legacy adaptive gated fusion are alternative guidance paths.")
         safe = _safe_heads(embed_dim, num_heads)
@@ -208,19 +214,27 @@ class CascadeViTBlock(nn.Module):
             if routing["mode"] != "off" else None
         )
 
+        if not use_text:
+            for name in ("norm_text", "text_cross_attn", "post_norm_text", "ls_text", "text_gate"):
+                setattr(self, name, None)
+        if not use_visual_refinement:
+            for name in ("norm_self", "self_attn", "post_norm_self", "ls_self", "norm_ffn", "ffn", "ls_ffn"):
+                setattr(self, name, None)
+
     def _legacy_guidance(self, x, text, prev_tokens, text_mask):
-        # 1. Text cross-attention + adaptive gated fusion: Q=image, KV=text [B, 80, 768]
-        visual = x
-        attn_out, _ = self.text_cross_attn(
-            self.norm_text(x), text, text, need_weights=False,
-            key_padding_mask=(text_mask == 0) if text_mask is not None else None,
-        )
-        text_update = self.drop_path(self.ls_text(self.post_norm_text(attn_out)))
-        if self.use_adaptive_gated_fusion:
-            text_enhanced = visual + text_update
-            x = self.text_gate(visual, text_enhanced)
-        else:
-            x = x + text_update
+        if self.use_text:
+            # 1. Text cross-attention + adaptive gated fusion: Q=image, KV=text [B, 80, 768]
+            visual = x
+            attn_out, _ = self.text_cross_attn(
+                self.norm_text(x), text, text, need_weights=False,
+                key_padding_mask=(text_mask == 0) if text_mask is not None else None,
+            )
+            text_update = self.drop_path(self.ls_text(self.post_norm_text(attn_out)))
+            if self.use_adaptive_gated_fusion:
+                text_enhanced = visual + text_update
+                x = self.text_gate(visual, text_enhanced)
+            else:
+                x = x + text_update
 
         # 2. Prev-stage cross-attention: Q=image, KV=prev [B, N_prev, C_prev]
         if (
@@ -278,13 +292,14 @@ class CascadeViTBlock(nn.Module):
                 x, text, prev_tokens, text_mask, routing_override, return_routing,
             )
 
-        # 3. Self-attention
-        normed = self.norm_self(x)
-        attn_out, _ = self.self_attn(normed, normed, normed, need_weights=False)
-        x = x + self.drop_path(self.ls_self(self.post_norm_self(attn_out)))
+        if self.use_visual_refinement:
+            # 3. Self-attention
+            normed = self.norm_self(x)
+            attn_out, _ = self.self_attn(normed, normed, normed, need_weights=False)
+            x = x + self.drop_path(self.ls_self(self.post_norm_self(attn_out)))
 
-        # 4. FFN
-        x = x + self.drop_path(self.ls_ffn(self.ffn(self.norm_ffn(x))))
+            # 4. FFN
+            x = x + self.drop_path(self.ls_ffn(self.ffn(self.norm_ffn(x))))
 
         return (x, weights, norms) if return_routing else x
 
@@ -315,6 +330,8 @@ class CascadeViTStage(nn.Module):
         use_adaptive_gated_fusion: bool = True,
         router_config: dict | None = None,
         text_group_index: int = 0,
+        use_text: bool = True,
+        use_visual_refinement: bool = True,
     ) -> None:
         super().__init__()
         self.use_checkpoint = use_checkpoint
@@ -354,6 +371,7 @@ class CascadeViTStage(nn.Module):
                 use_prev_cross_attention=use_prev_cross_attention,
                 use_adaptive_gated_fusion=use_adaptive_gated_fusion,
                 router_config=router_config, text_group_index=text_group_index,
+                use_text=use_text, use_visual_refinement=use_visual_refinement,
             )
             for i in range(depth)
         ])

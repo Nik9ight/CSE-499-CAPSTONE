@@ -37,9 +37,20 @@ def normalize_router_config(settings=None):
     return result
 
 
+# Defaults preserve pre-cumulative checkpoint behavior and parameter layout.
+CUMULATIVE_MODEL_DEFAULTS = {
+    "use_text": True,
+    "text_fusion_mode": "learned",
+    "use_visual_refinement": True,
+    "use_aspp": True,
+    "use_high_res_tail": True,
+}
+
+
 def model_kwargs_from_config(config):
     """Keep architecture settings in checkpoints, including behavior-only flags."""
     return {
+        **{key: getattr(config, key, default) for key, default in CUMULATIVE_MODEL_DEFAULTS.items()},
         "n_channels": config.n_channels,
         "n_classes": config.n_labels,
         "img_size": config.img_size,

@@ -174,6 +174,8 @@ class LViTLightningModule(pl.LightningModule):
     def configure_optimizers(self):
         backbone_params, head_params = [], []
         for name, param in self.model.named_parameters():
+            if not param.requires_grad and not name.startswith("backbone."):
+                continue
             # Frozen BERT lives under text_encoder.* and is never trained.
             if name.startswith("text_encoder."):
                 continue
