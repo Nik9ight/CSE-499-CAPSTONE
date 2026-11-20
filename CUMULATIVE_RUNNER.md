@@ -115,7 +115,105 @@ Add `--save-predictions` at study creation to save prediction masks per run. The
 
 For a limited pilot, use a different output directory and selectors, for example `--datasets qata --seeds 42 --experiments I0 I7 I8 I11`. Selectors change the study manifest; a pilot directory cannot later be reused as the full-study directory without moving to a new study. The default command always schedules all 72 runs.
 
+## Visualize the best I11 seed
+
+`visualize_i11.py` compares **validation global Dice** in the three I11
+`train_result.json` files (seeds 42, 1337, and 2026) for one dataset, then loads
+the winning run's best checkpoint. It requires all three training results;
+test scores do not participate in selection. Exact ties choose the lowest seed.
+The script restores architecture settings from the checkpoint and needs no retraining.
+
+```bash
+# Check the selected seed and paths without loading PyTorch or model weights.
+python visualize_i11.py --study-root /workspace/results/cumulative72 --dataset qata --dry-run
+
+# Export eight test cases from the winning seed.
+python visualize_i11.py \
+  --study-root /workspace/results/cumulative72 \
+  --dataset qata \
+  --data-root /workspace/data \
+  --num-cases 8
+
+# Choose exact cases, or use --num-cases 0 to export the entire split.
+python visualize_i11.py \
+  --study-root /workspace/results/cumulative72 \
+  --dataset MosMed \
+  --data-root /workspace/data \
+  --cases example1.png example2.png
+```
+
+Replace example filenames with names from the dataset. `--data-root` is the
+parent of `qata/` and `MosMed/`; omit it to use the path recorded in `spec.json`.
+If copying results from another machine, retain each seed's `spec.json` and
+`train_result.json`, plus the winning `models/best*.ckpt`. The script first looks
+for that exact checkpoint basename inside the copied run, so old absolute paths
+do not prevent loading. A missing winning checkpoint raises an error rather than
+silently selecting a different seed.
+
+Matplotlib is included in `requirements.txt`; install it with
+`python -m pip install matplotlib` in an existing training environment if needed.
+Existing model/tokenizer dependencies and cached BERT assets are also required.
+The default device is CUDA when available; `--device cpu` is supported.
+`--split val` selects validation images instead of test images.
+
+Outputs go to a new timestamped directory under
+`<study-root>/xai/<dataset>/seed_<winner>_<timestamp>/`. Use `--output-dir` to
+choose an empty destination. The script does not overwrite previous exports.
+
+Each case contains:
+
+- `summary.png` and `summary.pdf`: preprocessed image, ground truth and prediction
+  overlays, foreground probability, Seg-Grad-CAM, and false-positive/false-negative maps.
+- `routing_stage1.png` through `routing_stage4.png`: all six source weights and
+  contribution L2 norms, separately for every transformer block at native feature resolution.
+- `prediction.png`: the binary mask, stored as 0/255.
+- `maps.npz`: probabilities, raw and normalized CAM, the CAM target mask, ground truth,
+  prediction, token IDs/mask, and unaveraged routing arrays. Routing arrays have shape
+  `[blocks, height, width, 6]`; source names are included. Load with `allow_pickle=False`.
+- `case.json`: the prompt, CAM target/fallback, and per-case Dice/IoU.
+
+The export root contains `selection.json` with all three validation scores, the
+winning checkpoint and hash, protocol, versions, selected filenames, and export
+status, plus `cases.csv` with per-case metrics. Cases default to the first sorted
+filenames, not those with the highest test scores. Subset metrics are not full-test results.
+
+The prediction protocol remains one native-size FP32 forward (224 square for the
+cumulative study), threshold **strictly greater than 0.5**, no TTA, and no calibration
+file. XAI processes one case at a time to limit memory. No optimizer is used.
+
+Seg-Grad-CAM uses `decoder1` (56 square for a 224-square input), which combines
+the cascade features before the high-resolution tail. Its scalar target is the
+mean foreground logit within the detached predicted mask. An empty prediction
+instead targets the maximum-logit pixel, explicitly labelled in the figure and
+metadata. Ground truth is used for overlays and metrics, not to choose the CAM
+target. A zero positive CAM response is exported as zeros and explicitly flagged.
+The method follows the regional target principle in
+[SEG-GRAD-CAM](https://arxiv.org/abs/2002.11434).
+
+CAM is normalized independently for each case, so color intensity is not directly
+comparable across cases. Router weights use a fixed 0–1 scale; contribution norms
+share a scale across all blocks/sources within each stage figure. Raw values are
+preserved in `maps.npz`. Text groups represent BERT layer depths, not labelled
+anatomical concepts. No-update has zero contribution even when its weight is large;
+previous-stage memory is unavailable at stage 1. These maps describe internal
+computation and sensitivity, not causal proof or calibrated uncertainty.
+
 ## Validation
+
+XAI selection and model/figure export checks:
+
+```bash
+python -m pytest tests/test_visualize_i11.py tests/test_visualize_i11_model.py -q
+```
+
+Local validation on 2026-11-20: these 17 checks and the cumulative model,
+training/evaluation, and joint-router suites completed with **94 passed, 1 GPU-only
+test skipped**. The export check uses a saved tiny GRACE I11 checkpoint, the real
+dataset preprocessing, and local substitute encoders; it verifies prediction
+parity and writes all figures/arrays without pretrained downloads. The cumulative
+worker test fixture now restores global configuration between tests. Linux-only
+orchestration tests could not be rerun on this Windows host because WSL failed to
+start. Real pretrained checkpoints, datasets, and GPU execution remain unverified.
 
 Dependency-free batch tests:
 

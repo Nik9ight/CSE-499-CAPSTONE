@@ -136,8 +136,20 @@ def test_native_evaluation_ignores_saved_tta_and_writes_metrics(tiny_settings, t
     assert json.loads((tmp_path / "test_result.json").read_text()) == result
 
 
+@pytest.fixture
+def restore_worker_config():
+    """Workers configure the module globally; do not leak a variant into later tests."""
+    original = vars(config).copy()
+    yield
+    for name in set(vars(config)) - original.keys():
+        delattr(config, name)
+    for name, value in original.items():
+        setattr(config, name, value)
+
+
 @pytest.mark.parametrize("variant", ["I0", "I11"])
-def test_worker_real_fit_then_test_on_local_encoders(tiny_settings, tmp_path, monkeypatch, variant):
+def test_worker_real_fit_then_test_on_local_encoders(tiny_settings, tmp_path, monkeypatch, variant,
+                                                    restore_worker_config):
     import pytorch_lightning as pl
     import data_module
     import cumulative_worker

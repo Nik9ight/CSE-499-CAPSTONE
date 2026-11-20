@@ -17,6 +17,7 @@ downloads/
 datasets/
 Covid19/
 test_predictions/
+xai_outputs/
 *.zip
 *.sh
 !run_cumulative.sh
@@ -81,6 +82,8 @@ tests/*
 !tests/test_joint_router.py
 !tests/test_cumulative_runner.py
 !tests/test_cumulative_models.py
+!tests/test_visualize_i11.py
+!tests/test_visualize_i11_model.py
 # Check, timing and monitoring scripts that need real data or the GPU (not collected by pytest)
 !tests/check_dataset.py
 !tests/check_priority0.py

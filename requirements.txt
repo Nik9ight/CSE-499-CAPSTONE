@@ -12,4 +12,5 @@ tensorboardX
 ml_collections
 torchmetrics
 opencv-python
+matplotlib
 pytest
