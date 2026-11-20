@@ -48,14 +48,15 @@ Configure the dataset and prompt CSV paths in `Config.py`. Run commands from the
 Preview the resolved settings without loading datasets or downloading weights:
 
 ```text
-python train_model.py --experiment router_region --seed 42 --dry-run
+python train_model.py --experiment router_region --seed 42 --batch-size 16 --dry-run
 ```
 
-Start the proposed model and a baseline comparison:
+For an initial screen on one dataset, run the baseline and proposed model with batch size 16. Add the uniform control if GPU time permits:
 
 ```text
-python train_model.py --experiment router_region --seed 42
-python train_model.py --experiment baseline --seed 42
+python train_model.py --experiment baseline --seed 42 --batch-size 16
+python train_model.py --experiment router_region --seed 42 --batch-size 16
+python train_model.py --experiment parallel_uniform --seed 42 --batch-size 16
 ```
 
 Memory-conscious pilot configuration:
